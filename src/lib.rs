@@ -1,3 +1,41 @@
+//! A thread-safe key-based locking mechanism for managing concurrent access to resources.
+//!
+//! This crate provides a flexible lock manager that allows fine-grained locking based on keys.
+//! It supports both single-key and batch locking operations with RAII-style lock guards.
+//!
+//! # Features
+//!
+//! - Thread-safe key-based locking
+//! - Support for both single key and batch locking operations
+//! - RAII-style lock guards
+//! - Configurable capacity and sharding
+//!
+//! # Examples
+//!
+//! Single key locking:
+//! ```
+//! use batch_lock::LockManager;
+//!
+//! let lock_manager = LockManager::<String>::new();
+//! let guard = lock_manager.lock("resource_1".to_string());
+//! // Critical section - exclusive access guaranteed
+//! // Guard automatically releases lock when dropped
+//! ```
+//!
+//! Batch locking:
+//! ```
+//! use batch_lock::LockManager;
+//! use std::collections::BTreeSet;
+//!
+//! let lock_manager = LockManager::<String>::new();
+//! let mut keys = BTreeSet::new();
+//! keys.insert("resource_1".to_string());
+//! keys.insert("resource_2".to_string());
+//!
+//! let guard = lock_manager.batch_lock(keys);
+//! // Critical section - exclusive access to all keys guaranteed
+//! // Guard automatically releases all locks when dropped
+//! ```
 use dashmap::{DashMap, Entry};
 use std::collections::{BTreeSet, LinkedList};
 use std::hash::Hash;
@@ -17,34 +55,70 @@ impl WaiterPtr {
 unsafe impl Sync for WaiterPtr {}
 unsafe impl Send for WaiterPtr {}
 
-pub struct LockManager<K: Eq + Hash> {
+/// A thread-safe lock manager that provides key-based locking capabilities.
+///
+/// The `LockManager` allows concurrent access control based on keys of type `K`.
+/// It supports both single-key and batch locking operations.
+///
+/// Type parameter:
+/// - `K`: The key type that must implement `Eq + Hash + Clone` traits
+pub struct LockManager<K: Eq + Hash + Clone> {
     map: DashMap<K, LinkedList<WaiterPtr>>,
 }
 
 impl<K: Eq + Hash + Clone> LockManager<K> {
+    /// Creates a new `LockManager` instance with default capacity.
     pub fn new() -> Self {
         Self {
             map: DashMap::new(),
         }
     }
 
+    /// Creates a new `LockManager` with the specified capacity.
+    ///
+    /// # Arguments
+    /// * `capacity` - The initial capacity for the internal map
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             map: DashMap::with_capacity(capacity),
         }
     }
 
+    /// Creates a new `LockManager` with specified capacity and shard amount.
+    ///
+    /// # Arguments
+    /// * `capacity` - The initial capacity for the internal map
+    /// * `shard_amount` - The number of shards to use for internal concurrency
     pub fn with_capacity_and_shard_amount(capacity: usize, shard_amount: usize) -> Self {
         Self {
             map: DashMap::with_capacity_and_shard_amount(capacity, shard_amount),
         }
     }
 
+    /// Acquires a lock for a single key.
+    ///
+    /// This method will block until the lock can be acquired.
+    ///
+    /// # Arguments
+    /// * `key` - The key to lock
+    ///
+    /// # Returns
+    /// Returns a `LockGuard` that will automatically release the lock when dropped
     pub fn lock(&self, key: K) -> LockGuard<K> {
         self.raw_lock(&key);
         LockGuard::<K> { map: self, key }
     }
 
+    /// Acquires locks for multiple keys atomically.
+    ///
+    /// This method will block until all locks can be acquired. The locks are acquired
+    /// in a consistent order to prevent deadlocks.
+    ///
+    /// # Arguments
+    /// * `keys` - A `BTreeSet` containing the keys to lock
+    ///
+    /// # Returns
+    /// Returns a `BatchLockGuard` that will automatically release all locks when dropped
     pub fn batch_lock(&self, keys: BTreeSet<K>) -> BatchLockGuard<K> {
         for key in &keys {
             self.raw_lock(key);
@@ -95,6 +169,9 @@ impl<K: Eq + Hash + Clone> Default for LockManager<K> {
     }
 }
 
+/// RAII guard for a single locked key.
+///
+/// When this guard is dropped, the lock will be automatically released.
 pub struct LockGuard<'a, K: Eq + Hash + Clone> {
     map: &'a LockManager<K>,
     key: K,
@@ -106,6 +183,10 @@ impl<'a, K: Eq + Hash + Clone> Drop for LockGuard<'a, K> {
     }
 }
 
+/// RAII guard for multiple locked keys.
+///
+/// When this guard is dropped, all locks will be automatically released
+/// in the reverse order they were acquired.
 pub struct BatchLockGuard<'a, K: Eq + Hash + Clone> {
     map: &'a LockManager<K>,
     keys: BTreeSet<K>,
