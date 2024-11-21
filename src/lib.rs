@@ -17,7 +17,8 @@
 //! use batch_lock::LockManager;
 //!
 //! let lock_manager = LockManager::<String>::new();
-//! let guard = lock_manager.lock("resource_1".to_string());
+//! let key = "resource_1".to_string();
+//! let guard = lock_manager.lock(&key);
 //! // Critical section - exclusive access guaranteed
 //! // Guard automatically releases lock when dropped
 //! ```
@@ -32,7 +33,7 @@
 //! keys.insert("resource_1".to_string());
 //! keys.insert("resource_2".to_string());
 //!
-//! let guard = lock_manager.batch_lock(keys);
+//! let guard = lock_manager.batch_lock(&keys);
 //! // Critical section - exclusive access to all keys guaranteed
 //! // Guard automatically releases all locks when dropped
 //! ```
@@ -104,9 +105,9 @@ impl<K: Eq + Hash + Clone> LockManager<K> {
     ///
     /// # Returns
     /// Returns a `LockGuard` that will automatically release the lock when dropped
-    pub fn lock(&self, key: K) -> LockGuard<K> {
-        self.raw_lock(&key);
-        LockGuard::<K> { map: self, key }
+    pub fn lock<'a, 'b>(&'a self, key: &'b K) -> LockGuard<'a, 'b, K> {
+        self.raw_lock(key);
+        LockGuard::<'a, 'b, K> { map: self, key }
     }
 
     /// Acquires locks for multiple keys atomically.
@@ -119,11 +120,11 @@ impl<K: Eq + Hash + Clone> LockManager<K> {
     ///
     /// # Returns
     /// Returns a `BatchLockGuard` that will automatically release all locks when dropped
-    pub fn batch_lock(&self, keys: BTreeSet<K>) -> BatchLockGuard<K> {
-        for key in &keys {
+    pub fn batch_lock<'a, 'b>(&'a self, keys: &'b BTreeSet<K>) -> BatchLockGuard<'a, 'b, K> {
+        for key in keys {
             self.raw_lock(key);
         }
-        BatchLockGuard::<K> { map: self, keys }
+        BatchLockGuard::<'a, 'b, K> { map: self, keys }
     }
 
     fn raw_lock(&self, key: &K) {
@@ -172,14 +173,14 @@ impl<K: Eq + Hash + Clone> Default for LockManager<K> {
 /// RAII guard for a single locked key.
 ///
 /// When this guard is dropped, the lock will be automatically released.
-pub struct LockGuard<'a, K: Eq + Hash + Clone> {
+pub struct LockGuard<'a, 'b, K: Eq + Hash + Clone> {
     map: &'a LockManager<K>,
-    key: K,
+    key: &'b K,
 }
 
-impl<'a, K: Eq + Hash + Clone> Drop for LockGuard<'a, K> {
+impl<'a, 'b, K: Eq + Hash + Clone> Drop for LockGuard<'a, 'b, K> {
     fn drop(&mut self) {
-        self.map.unlock(&self.key);
+        self.map.unlock(self.key);
     }
 }
 
@@ -187,14 +188,14 @@ impl<'a, K: Eq + Hash + Clone> Drop for LockGuard<'a, K> {
 ///
 /// When this guard is dropped, all locks will be automatically released
 /// in the reverse order they were acquired.
-pub struct BatchLockGuard<'a, K: Eq + Hash + Clone> {
+pub struct BatchLockGuard<'a, 'b, K: Eq + Hash + Clone> {
     map: &'a LockManager<K>,
-    keys: BTreeSet<K>,
+    keys: &'b BTreeSet<K>,
 }
 
-impl<'a, K: Eq + Hash + Clone> Drop for BatchLockGuard<'a, K> {
+impl<'a, 'b, K: Eq + Hash + Clone> Drop for BatchLockGuard<'a, 'b, K> {
     fn drop(&mut self) {
-        self.map.batch_unlock(&self.keys);
+        self.map.batch_unlock(self.keys);
     }
 }
 
@@ -218,7 +219,7 @@ mod tests {
                 let current = current.clone();
                 std::thread::spawn(move || {
                     for _ in 0..N {
-                        let _guard = lock_map.lock(1);
+                        let _guard = lock_map.lock(&1);
                         let now = current.fetch_add(1, Ordering::AcqRel);
                         assert_eq!(now, 0);
                         total.fetch_add(1, Ordering::AcqRel);
@@ -245,7 +246,8 @@ mod tests {
                 let total = total.clone();
                 std::thread::spawn(move || {
                     for _ in 0..N {
-                        let _guard = lock_map.lock(rand::random());
+                        let key = rand::random();
+                        let _guard = lock_map.lock(&key);
                         total.fetch_add(1, Ordering::AcqRel);
                     }
                 })
@@ -273,7 +275,7 @@ mod tests {
                 let state = (0..M).filter(|v| *v != i).collect::<BTreeSet<_>>();
                 std::thread::spawn(move || {
                     for _ in 0..N {
-                        let _guard = lock_map.batch_lock(state.clone());
+                        let _guard = lock_map.batch_lock(&state);
                         let now = current.fetch_add(1, Ordering::AcqRel);
                         assert_eq!(now, 0);
                         total.fetch_add(1, Ordering::AcqRel);
@@ -293,7 +295,7 @@ mod tests {
         let lock_map = LockManager::<u32>::default();
         let _lock_guard = LockGuard {
             map: &lock_map,
-            key: 42,
+            key: &42,
         };
     }
 }
